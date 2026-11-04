@@ -88,7 +88,7 @@ def copy_with_new_metadata(reader: gguf.GGUFReader, writer: gguf.GGUFWriter, new
 
     for key, val in new_metadata.items():
         logger.debug(f'Adding {key}: "{val.value}" {val.description}')
-        writer.add_key_value(key, val.value, val.type)
+        writer.add_key_value(key, val.value, val.type, sub_type=sub_type if val.sub_type is None else val.sub_type)
 
     total_bytes = 0
 
