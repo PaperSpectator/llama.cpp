@@ -19,11 +19,8 @@ import struct
 import tempfile
 from pathlib import Path
 
-from gguf import GGUFReader, GGUFValueType
+from gguf import GGUFReader, GGUFValueType, Keys
 
-
-TOKENS_KEY = "tokenizer.ggml.tokens"
-TOKEN_TYPES_KEY = "tokenizer.ggml.token_type"
 CHUNK_SIZE = 8 * 1024 * 1024
 
 
@@ -101,16 +98,16 @@ def rename_tokens(
     reader = GGUFReader(source)
     fields = reader.fields
 
-    token_field = fields.get(TOKENS_KEY)
+    token_field = fields.get(Keys.Tokenizer.LIST)
     if token_field is None:
-        raise ValueError(f"Missing GGUF field: {TOKENS_KEY}")
+        raise ValueError(f"Missing GGUF field: {Keys.Tokenizer.LIST}")
 
     if token_field.types != [
         GGUFValueType.ARRAY,
         GGUFValueType.STRING,
     ]:
         raise ValueError(
-            f"{TOKENS_KEY} is not an ARRAY<STRING>: {token_field.types}"
+            f"{Keys.Tokenizer.LIST} is not an ARRAY<STRING>: {token_field.types}"
         )
 
     tokens = token_field.contents()
@@ -170,11 +167,11 @@ def rename_tokens(
         raise ValueError("Unexpected GGUF section layout; refusing to edit")
 
     # Snapshot the token types so we can verify them after rewriting.
-    type_field = fields.get(TOKEN_TYPES_KEY)
+    type_field = fields.get(Keys.Tokenizer.TOKEN_TYPE)
     original_types = type_field.contents() if type_field else None
 
     replacement_field = build_replacement_field(
-        TOKENS_KEY, tokens, endian
+        Keys.Tokenizer.LIST, tokens, endian
     )
 
     # Construct everything before the tensor data.
@@ -247,7 +244,7 @@ def rename_tokens(
         # Validate the temporary output before publishing it.
         check = GGUFReader(temp_path)
         try:
-            check_tokens = check.fields[TOKENS_KEY].contents()
+            check_tokens = check.fields[Keys.Tokenizer.LIST].contents()
             for token_id, replacement in mapping.items():
                 if check_tokens[token_id] != replacement:
                     raise RuntimeError(
@@ -255,7 +252,7 @@ def rename_tokens(
                     )
 
             if original_types is not None:
-                check_types = check.fields[TOKEN_TYPES_KEY].contents()
+                check_types = check.fields[Keys.Tokenizer.TOKEN_TYPE].contents()
                 if check_types != original_types:
                     raise RuntimeError("Token types changed unexpectedly")
 
