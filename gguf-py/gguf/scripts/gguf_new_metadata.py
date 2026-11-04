@@ -41,6 +41,15 @@ def find_token(token_list: Sequence[int], token: str) -> Sequence[int]:
 
     return token_ids
 
+def auto_metadata_details(data: Any):
+    data_type = gguf.GGUFValueType.get_type(data["value"])
+    data_value = data["value"]
+    sub_type  = None
+    if data_type == gguf.GGUFValueType.ARRAY:
+        if "sub_type" not in data:
+            raise TypeError(f'{data["value"]} has no sub_type and is an array')
+        sub_type = getattr(gguf.GGUFValueType, data["sub_type"])
+    return MetadataDetails(type=data_type, value=data_value, sub_type=sub_type)
 
 def copy_with_new_metadata(reader: gguf.GGUFReader, writer: gguf.GGUFWriter, new_metadata: dict[str, MetadataDetails], remove_metadata: Sequence[str]) -> None:
     for field in reader.fields.values():
@@ -116,6 +125,7 @@ def main() -> None:
     parser.add_argument("--remove-metadata",      action="append",     type=str,  help="Remove metadata (by key name) from output model", metavar='general.url')
     parser.add_argument("--special-token",        action="append",     type=str,  help="Special token by value", nargs=2, metavar=(' | '.join(token_names.keys()), '"<token>"'))
     parser.add_argument("--special-token-by-id",  action="append",     type=str,  help="Special token by id", nargs=2, metavar=(' | '.join(token_names.keys()), '0'))
+    parser.add_argument("--json",                                      type=Path, help="Update metadata from a subset specified in a JSON file (CLI args override)")
     parser.add_argument("--force",                action="store_true",            help="Bypass warnings without confirmation")
     parser.add_argument("--verbose",              action="store_true",            help="Increase output verbosity")
     args = parser.parse_args(None if len(sys.argv) > 2 else ["--help"])
@@ -124,6 +134,14 @@ def main() -> None:
 
     new_metadata = {}
     remove_metadata = args.remove_metadata or []
+
+    if args.json:
+        with open(args.json) as json_f:
+            incoming_data = json.load(json_f)
+            if isinstance(incoming_data, dict):
+                logger.debug("Valid metadata incoming, setting new_metadata defaults.")
+                new_metadata.update({k: auto_metadata_details(v) for k, v in incoming_data.items()})
+                print(new_metadata)
 
     if args.general_name:
         new_metadata[gguf.Keys.General.NAME] = MetadataDetails(gguf.GGUFValueType.STRING, args.general_name)
