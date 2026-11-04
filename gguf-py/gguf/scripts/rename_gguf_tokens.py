@@ -15,11 +15,11 @@ import argparse
 import hashlib
 import json
 import os
-import struct
 import tempfile
 from pathlib import Path
 
-from gguf import GGUFReader, GGUFValueType, Keys
+from gguf import GGUFReader, GGUFWriter, GGUFValueType, Keys
+from tqdm import tqdm
 
 CHUNK_SIZE = 8 * 1024 * 1024
 
@@ -42,37 +42,6 @@ def close_gguf_reader(reader):
 
     if mmap_obj is not None:
         mmap_obj.close()
-
-def encode_token_array(tokens: list[str], endian: str) -> bytes:
-    """Encode a GGUF ARRAY<STRING> value (including its array type/count)."""
-    result = bytearray()
-    result += struct.pack(endian + "I", int(GGUFValueType.STRING))
-    result += struct.pack(endian + "Q", len(tokens))
-
-    for token in tokens:
-        encoded = token.encode("utf-8")
-        result += struct.pack(endian + "Q", len(encoded))
-        result += encoded
-
-    return bytes(result)
-
-
-def build_replacement_field(
-    key: str,
-    tokens: list[str],
-    endian: str,
-) -> bytes:
-    """Encode the complete key + value-type + array field."""
-    key_bytes = key.encode("utf-8")
-    result = bytearray()
-
-    result += struct.pack(endian + "Q", len(key_bytes))
-    result += key_bytes
-    result += struct.pack(endian + "I", int(GGUFValueType.ARRAY))
-    result += encode_token_array(tokens, endian)
-
-    return bytes(result)
-
 
 def rename_tokens(
     source: Path,
@@ -142,59 +111,12 @@ def rename_tokens(
     if not reader.tensors:
         raise ValueError("This prototype requires at least one tensor")
 
-    endian = "<" if reader.byte_order == "I" else ">"
-
-    # ReaderField.offset points to the beginning of the complete KV entry.
-    field_start = token_field.offset
-    field_end = field_start + sum(
-        int(part.nbytes) for part in token_field.parts
-    )
-
-    # Tensor-info region starts at the first tensor's metadata record.
-    tensor_info_start = min(t.field.offset for t in reader.tensors)
-    tensor_info_end = max(
-        t.field.offset + sum(int(p.nbytes) for p in t.field.parts)
-        for t in reader.tensors
-    )
-
     old_data_start = reader.data_offset
     alignment = int(reader.alignment)
-
-    if not (
-        24 <= field_start < field_end <= tensor_info_start
-        <= tensor_info_end <= old_data_start <= reader.data.nbytes
-    ):
-        raise ValueError("Unexpected GGUF section layout; refusing to edit")
 
     # Snapshot the token types so we can verify them after rewriting.
     type_field = fields.get(Keys.Tokenizer.TOKEN_TYPE)
     original_types = type_field.contents() if type_field else None
-
-    replacement_field = build_replacement_field(
-        Keys.Tokenizer.LIST, tokens, endian
-    )
-
-    # Construct everything before the tensor data.
-    #
-    # Keep:
-    #   header
-    #   all KV bytes before the target field
-    #   replacement field
-    #   all remaining KV bytes
-    #   original tensor-info records
-    #
-    # Recalculate padding to the next tensor-data alignment boundary.
-    pre_data_size = (
-        field_start
-        + len(replacement_field)
-        + (tensor_info_start - field_end)
-        + (tensor_info_end - tensor_info_start)
-    )
-    new_data_start = (
-        (pre_data_size + alignment - 1) // alignment
-    ) * alignment
-
-    padding = new_data_start - pre_data_size
 
     output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -212,34 +134,37 @@ def rename_tokens(
             delete=False,
         ) as out:
             temp_path = Path(out.name)
+            arch = reader.get_field(Keys.General.ARCHITECTURE).contents()
+            writer = GGUFWriter(out.name, arch=arch, endianess=reader.endianess)
+            alignment_f = reader.get_field(Keys.General.ALIGNMENT)
+            if alignment_f is not None:
+                writer.data_alignment = alignment.contents()
+            for field in reader.fields.values():
+                if field.name == Keys.General.ARCHITECTURE or field.name.startswith('GGUF.'):
+                    # if we copy these, they'll get dupped and the checker will complain
+                    continue
+                if field.name == Keys.Tokenizer.LIST:
+                    writer.add_key_value(Keys.Tokenizer.LIST, tokens, GGUFValueType.ARRAY, sub_type=GGUFValueType.STRING)
+                else:
+                    val_type = field.types[0]
+                    sub_type = field.types[-1] if val_type == GGUFValueType.ARRAY else None
+                    val = field.contents()
+                    writer.add_key_value(field.name, field.contents(), val_type, sub_type=sub_type)
 
-            # GGUF header, unchanged.
-            write_region(out, reader.data, 0, field_start)
+            total_bytes = 0
+            for tensor in reader.tensors:
+                total_bytes += tensor.n_bytes
+                writer.add_tensor_info(tensor.name, tensor.data.shape, tensor.data.dtype, tensor.data.nbytes, tensor.tensor_type)
 
-            # Re-encoded vocabulary field.
-            out.write(replacement_field)
+            bar = tqdm(desc="Writing", total=total_bytes, unit="byte", unit_scale=True)
 
-            # Remaining metadata KV entries.
-            write_region(
-                out, reader.data, field_end, tensor_info_start
-            )
-
-            # Original tensor-info records, unchanged.
-            write_region(
-                out, reader.data, tensor_info_start, tensor_info_end
-            )
-
-            # New alignment padding.
-            if padding:
-                out.write(b"\x00" * padding)
-
-            # Original tensor-data region, unchanged.
-            write_region(
-                out, reader.data, old_data_start, reader.data.nbytes
-            )
-
-            out.flush()
-            os.fsync(out.fileno())
+            writer.write_header_to_file()
+            writer.write_kv_data_to_file()
+            writer.write_ti_data_to_file()
+            for tensor in reader.tensors:
+                writer.write_tensor_data(tensor.data, tensor_endianess=reader.endianess)
+                bar.update(tensor.n_bytes)
+            writer.close()
 
         # Validate the temporary output before publishing it.
         check = GGUFReader(temp_path)
