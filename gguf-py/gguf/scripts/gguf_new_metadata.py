@@ -42,7 +42,13 @@ def find_token(token_list: Sequence[int], token: str) -> Sequence[int]:
     return token_ids
 
 def auto_metadata_details(data: Any):
-    data_type = gguf.GGUFValueType.get_type(data["value"])
+    if "type" in data:
+        try:
+            data_type = getattr(gguf.GGUFValueType.get_type, data["type"])
+        except AttributeError as e:
+            data_type = gguf.GGUFValueType.get_type(data["value"])
+    else:
+        data_type = gguf.GGUFValueType.get_type(data["value"])
     data_value = data["value"]
     sub_type  = None
     if data_type == gguf.GGUFValueType.ARRAY:
