@@ -44,8 +44,8 @@ def find_token(token_list: Sequence[int], token: str) -> Sequence[int]:
 def auto_metadata_details(data: Any):
     if "type" in data:
         try:
-            data_type = getattr(gguf.GGUFValueType.get_type, data["type"])
-        except AttributeError as e:
+            data_type = getattr(gguf.GGUFValueType, data["type"])
+        except AttributeError:
             data_type = gguf.GGUFValueType.get_type(data["value"])
     else:
         data_type = gguf.GGUFValueType.get_type(data["value"])
